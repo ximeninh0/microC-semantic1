@@ -170,12 +170,12 @@ def resolve_names(program: Program) -> None:
     elif main.type is not TypeName.INT or main.parameter_types:
         reasons = []
         if main.type is not TypeName.INT:
-            reasons.append("o retorno deve ser 'int' ")
+            reasons.append("o retorno deve ser 'int'")
         if main.parameter_types:
             reasons.append("não deve haver parâmetros")
         diagnostics.append(SemanticDiagnostic(
             kind=SemanticErrorKind.INVALID_MAIN,
-            message="Em 'main', ".join(reasons),
+            message="Em 'main', " + " e ".join(reasons),
             span=main.declaration.span,
         ))
     # 3. Percorra os corpos em ordem, criando um escopo para cada bloco.

@@ -84,7 +84,7 @@ def check_types(program: Program) -> None:
 
         if isinstance(expr, IdentifierExpr):
             symbol = expr.metadata.get("symbol")
-            if symbol is not None:
+            if symbol is not None and symbol.type != TypeName.VOID:
                 expr.metadata["type"] = symbol.type
                 return symbol.type
             return None
@@ -307,7 +307,9 @@ def check_types(program: Program) -> None:
                         )
                     )
             else:
-                val_type = type_of_expr(stmt.value, in_value_context=True)
+                val_type = type_of_expr(
+                    stmt.value, in_value_context=expected_type != TypeName.VOID
+                )
                 if expected_type == TypeName.VOID:
                     diagnostics.append(
                         SemanticDiagnostic(
