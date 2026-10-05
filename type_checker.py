@@ -10,6 +10,7 @@ from ast_nodes import (
     CallExpr,
     CallStmt,
     Expr,
+    FunctionDecl,
     IdentifierExpr,
     IfStmt,
     IntLiteral,
@@ -61,8 +62,9 @@ def check_types(program: Program) -> None:
     # 3. Valide operadores, chamadas, comandos e declarações.
     # 4. Anote expressões válidas e acumule os diagnósticos da passagem.
     diagnostics: list[SemanticDiagnostic] = []
+    current_function: FunctionDecl | None = None
 
-    def type_of_expr(expr: Expr) -> TypeName | None:
+    def type_of_expr(expr: Expr, in_value_context: bool = True) -> TypeName | None:
         if isinstance(expr, IntLiteral):
             if expr.value < 0 or expr.value > MAX_INT:
                 diagnostics.append(
@@ -88,7 +90,7 @@ def check_types(program: Program) -> None:
             return None
 
         if isinstance(expr, UnaryExpr):
-            operand_type = type_of_expr(expr.operand)
+            operand_type = type_of_expr(expr.operand, in_value_context=True)
             if operand_type is None:
                 return None
 
@@ -121,8 +123,8 @@ def check_types(program: Program) -> None:
             return None
 
         if isinstance(expr, BinaryExpr):
-            left_type = type_of_expr(expr.left)
-            right_type = type_of_expr(expr.right)
+            left_type = type_of_expr(expr.left, in_value_context=True)
+            right_type = type_of_expr(expr.right, in_value_context=True)
 
             if left_type is None or right_type is None:
                 return None
@@ -160,15 +162,60 @@ def check_types(program: Program) -> None:
             return None
 
         if isinstance(expr, CallExpr):
-            for arg in expr.arguments:
-                type_of_expr(arg)
-
             symbol = expr.metadata.get("symbol")
-            if isinstance(symbol, FunctionSymbol):
-                if symbol.type != TypeName.VOID:
-                    expr.metadata["type"] = symbol.type
-                return symbol.type
-            return None
+            if not isinstance(symbol, FunctionSymbol):
+                for arg in expr.arguments:
+                    type_of_expr(arg, in_value_context=True)
+                return None
+
+            expected_params = symbol.parameter_types
+            if len(expr.arguments) != len(expected_params):
+                diagnostics.append(
+                    SemanticDiagnostic(
+                        kind=SemanticErrorKind.ARITY_MISMATCH,
+                        message=(
+                            f"Chamada de '{expr.name}' espera {len(expected_params)} "
+                            f"argumentos, recebeu {len(expr.arguments)}"
+                        ),
+                        span=expr.span,
+                    )
+                )
+
+            arg_types: list[TypeName | None] = []
+            for arg in expr.arguments:
+                arg_types.append(type_of_expr(arg, in_value_context=True))
+
+            common_len = min(len(expr.arguments), len(expected_params))
+            for i in range(common_len):
+                arg_type = arg_types[i]
+                expected_type = expected_params[i]
+                if arg_type is not None and arg_type != expected_type:
+                    diagnostics.append(
+                        SemanticDiagnostic(
+                            kind=SemanticErrorKind.ARGUMENT_TYPE_MISMATCH,
+                            message=(
+                                f"Argumento {i + 1} de '{expr.name}' espera tipo "
+                                f"'{expected_type.value}', recebeu '{arg_type.value}'"
+                            ),
+                            span=expr.arguments[i].span,
+                        )
+                    )
+
+            if symbol.type == TypeName.VOID:
+                if in_value_context:
+                    diagnostics.append(
+                        SemanticDiagnostic(
+                            kind=SemanticErrorKind.VOID_VALUE_USED,
+                            message=f"Função 'void' '{expr.name}' usada como valor",
+                            span=expr.span,
+                        )
+                    )
+                    return None
+                expr.metadata["type"] = TypeName.VOID
+                return TypeName.VOID
+
+            expr.metadata["type"] = symbol.type
+            return symbol.type
 
         return None
 
@@ -187,38 +234,107 @@ def check_types(program: Program) -> None:
                     )
                 )
             if stmt.initializer is not None:
-                type_of_expr(stmt.initializer)
+                init_type = type_of_expr(stmt.initializer, in_value_context=True)
+                if stmt.type != TypeName.VOID and init_type is not None:
+                    if init_type != stmt.type:
+                        diagnostics.append(
+                            SemanticDiagnostic(
+                                kind=SemanticErrorKind.INITIALIZER_TYPE_MISMATCH,
+                                message=(
+                                    f"Inicializador da variável '{stmt.name}' tem tipo "
+                                    f"'{init_type.value}', esperado '{stmt.type.value}'"
+                                ),
+                                span=stmt.initializer.span,
+                            )
+                        )
 
         elif isinstance(stmt, Assignment):
-            type_of_expr(stmt.target)
-            type_of_expr(stmt.value)
+            target_type = type_of_expr(stmt.target, in_value_context=True)
+            val_type = type_of_expr(stmt.value, in_value_context=True)
+            if target_type is not None and val_type is not None:
+                if val_type != target_type:
+                    diagnostics.append(
+                        SemanticDiagnostic(
+                            kind=SemanticErrorKind.ASSIGNMENT_TYPE_MISMATCH,
+                            message=(
+                                f"Atribuição incompatível: variável de tipo "
+                                f"'{target_type.value}' recebeu valor de tipo '{val_type.value}'"
+                            ),
+                            span=stmt.value.span,
+                        )
+                    )
 
         elif isinstance(stmt, CallStmt):
-            type_of_expr(stmt.call)
-            symbol = stmt.call.metadata.get("symbol")
-            if isinstance(symbol, FunctionSymbol) and symbol.type == TypeName.VOID:
-                stmt.call.metadata["type"] = TypeName.VOID
+            type_of_expr(stmt.call, in_value_context=False)
 
         elif isinstance(stmt, IfStmt):
-            type_of_expr(stmt.condition)
+            cond_type = type_of_expr(stmt.condition, in_value_context=True)
+            if cond_type is not None and cond_type != TypeName.BOOL:
+                diagnostics.append(
+                    SemanticDiagnostic(
+                        kind=SemanticErrorKind.CONDITION_TYPE_MISMATCH,
+                        message=f"Condição de 'if' exige tipo 'bool', recebeu '{cond_type.value}'",
+                        span=stmt.condition.span,
+                    )
+                )
             check_stmt(stmt.then_block)
             if stmt.else_block is not None:
                 check_stmt(stmt.else_block)
 
         elif isinstance(stmt, WhileStmt):
-            type_of_expr(stmt.condition)
+            cond_type = type_of_expr(stmt.condition, in_value_context=True)
+            if cond_type is not None and cond_type != TypeName.BOOL:
+                diagnostics.append(
+                    SemanticDiagnostic(
+                        kind=SemanticErrorKind.CONDITION_TYPE_MISMATCH,
+                        message=f"Condição de 'while' exige tipo 'bool', recebeu '{cond_type.value}'",
+                        span=stmt.condition.span,
+                    )
+                )
             check_stmt(stmt.body)
 
         elif isinstance(stmt, ReturnStmt):
-            if stmt.value is not None:
-                type_of_expr(stmt.value)
+            expected_type = (
+                current_function.return_type if current_function is not None else None
+            )
+            if stmt.value is None:
+                if expected_type != TypeName.VOID:
+                    diagnostics.append(
+                        SemanticDiagnostic(
+                            kind=SemanticErrorKind.RETURN_MISMATCH,
+                            message="Comando 'return' sem valor em função não-void",
+                            span=stmt.span,
+                        )
+                    )
+            else:
+                val_type = type_of_expr(stmt.value, in_value_context=True)
+                if expected_type == TypeName.VOID:
+                    diagnostics.append(
+                        SemanticDiagnostic(
+                            kind=SemanticErrorKind.RETURN_MISMATCH,
+                            message="Função 'void' não pode retornar valor",
+                            span=stmt.value.span,
+                        )
+                    )
+                elif val_type is not None and val_type != expected_type:
+                    diagnostics.append(
+                        SemanticDiagnostic(
+                            kind=SemanticErrorKind.RETURN_MISMATCH,
+                            message=(
+                                f"Tipo de retorno incompatível: esperado '{expected_type.value}', "
+                                f"recebeu '{val_type.value}'"
+                            ),
+                            span=stmt.value.span,
+                        )
+                    )
 
         elif isinstance(stmt, PrintStmt):
             for item in stmt.items:
                 if isinstance(item, Expr):
-                    type_of_expr(item)
+                    type_of_expr(item, in_value_context=True)
 
     for function in program.functions:
+        current_function = function
         for param in function.parameters:
             if param.type == TypeName.VOID:
                 diagnostics.append(
